@@ -81,8 +81,9 @@ log = logging.getLogger(__name__)
 PROXY_TYPE_SOCKS4 = SOCKS4 = 1
 PROXY_TYPE_SOCKS5 = SOCKS5 = 2
 PROXY_TYPE_HTTP = HTTP = 3
+PROXY_TYPE_HTTP_4TO6 = HTTP_4TO6 = 4
 
-PROXY_TYPES = {"SOCKS4": SOCKS4, "SOCKS5": SOCKS5, "HTTP": HTTP}
+PROXY_TYPES = {"SOCKS4": SOCKS4, "SOCKS5": SOCKS5, "HTTP": HTTP, "HTTP_4TO6": HTTP_4TO6}
 PRINTABLE_PROXY_TYPES = dict(zip(PROXY_TYPES.values(), PROXY_TYPES.keys()))
 
 _orgsocket = _orig_socket = socket.socket
@@ -162,7 +163,7 @@ SOCKS5_ERRORS = {
     0x08: "Address type not supported"
 }
 
-DEFAULT_PORTS = {SOCKS4: 1080, SOCKS5: 1080, HTTP: 8080}
+DEFAULT_PORTS = {SOCKS4: 1080, SOCKS5: 1080, HTTP: 8080, HTTP_4TO6: 8080}
 
 
 def set_default_proxy(proxy_type=None, addr=None, port=None, rdns=True,
@@ -764,10 +765,65 @@ class socksocket(_BaseSocket):
         self.proxy_sockname = (b"0.0.0.0", 0)
         self.proxy_peername = addr, dest_port
 
+    def _negotiate_HTTP_4TO6(self, dest_addr, dest_port):
+        """
+        Negotiates a connection through an HTTP server with ipv4 address and ipv6 tunnel.
+        NOTE: This currently only supports HTTP CONNECT-style proxies.
+        """
+        proxy_type, addr, port, rdns, username, password = self.proxy
+
+        # If we need to resolve locally, we do this now
+        addr = dest_addr if rdns else socket.gethostbyname(dest_addr)
+
+        http_headers = [
+            b"CONNECT " + addr.encode('idna') + b":" + str(dest_port).encode() + b" HTTP/1.1",
+            b"Host: " + dest_addr.encode('idna')
+        ]
+
+        if username and password:
+            http_headers.append(b"Proxy-Authorization: basic " + b64encode(username + b":" + password))
+
+        http_headers.append(b"\r\n")
+
+        self.sendall(b"\r\n".join(http_headers))
+
+        # We just need the first line to check if the connection was successful
+        fobj = self.makefile()
+        status_line = fobj.readline()
+        fobj.close()
+
+        if not status_line:
+            raise GeneralProxyError("Connection closed unexpectedly")
+
+        try:
+            proto, status_code, status_msg = status_line.split(" ", 2)
+        except ValueError:
+            raise GeneralProxyError("HTTP proxy server sent invalid response")
+
+        if not proto.startswith("HTTP/"):
+            raise GeneralProxyError("Proxy server does not appear to be an HTTP proxy")
+
+        try:
+            status_code = int(status_code)
+        except ValueError:
+            raise HTTPError("HTTP proxy server did not return a valid HTTP status")
+
+        if status_code != 200:
+            error = "{0}: {1}".format(status_code, status_msg)
+            if status_code in (400, 403, 405):
+                # It's likely that the HTTP proxy server does not support the CONNECT tunneling method
+                error += ("\n[*] Note: The HTTP proxy server may not be supported by PySocks"
+                          " (must be a CONNECT tunnel proxy)")
+            raise HTTPError(error)
+
+        self.proxy_sockname = (b"0.0.0.0", 0)
+        self.proxy_peername = addr, dest_port
+
     _proxy_negotiators = {
                            SOCKS4: _negotiate_SOCKS4,
                            SOCKS5: _negotiate_SOCKS5,
-                           HTTP: _negotiate_HTTP
+                           HTTP: _negotiate_HTTP,
+                           HTTP_4TO6: _negotiate_HTTP_4TO6
                          }
 
     @set_self_blocking
@@ -779,7 +835,10 @@ class socksocket(_BaseSocket):
 
         dest_pair - 2-tuple of (IP/hostname, port).
         """
-        if len(dest_pair) != 2 or dest_pair[0].startswith("["):
+
+        proxy_type, proxy_addr, proxy_port, rdns, username, password = self.proxy
+
+        if (len(dest_pair) != 2 or dest_pair[0].startswith("[")) and proxy_type != HTTP_4TO6:
             # Probably IPv6, not supported -- raise an error, and hope
             # Happy Eyeballs (RFC6555) makes sure at least the IPv4
             # connection works...
@@ -845,7 +904,7 @@ class socksocket(_BaseSocket):
         else:
             # Connected to proxy server, now negotiate
             try:
-                # Calls negotiate_{SOCKS4, SOCKS5, HTTP}
+                # Calls negotiate_{SOCKS4, SOCKS5, HTTP, HTTP_4TO6}
                 negotiate = self._proxy_negotiators[proxy_type]
                 negotiate(self, dest_addr, dest_port)
             except socket.error as error:
