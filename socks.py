@@ -845,6 +845,9 @@ class socksocket(_BaseSocket):
             raise socket.error("PySocks doesn't support IPv6: %s"
                                % str(dest_pair))
 
+        if len(dest_pair) == 4:
+            dest_pair = (dest_pair[0], dest_pair[1])
+
         dest_addr, dest_port = dest_pair
 
         if self.type == socket.SOCK_DGRAM:
