@@ -838,7 +838,7 @@ class socksocket(_BaseSocket):
 
         proxy_type, proxy_addr, proxy_port, rdns, username, password = self.proxy
 
-        if (len(dest_pair) != 2 or dest_pair[0].startswith("[")) and proxy_type != HTTP_4TO6:
+        if (len(dest_pair) != 2 or dest_pair[0].startswith("[")) and proxy_type != HTTP_4TO6 and proxy_type != SOCKS5:
             # Probably IPv6, not supported -- raise an error, and hope
             # Happy Eyeballs (RFC6555) makes sure at least the IPv4
             # connection works...
